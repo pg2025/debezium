@@ -118,9 +118,10 @@ public final class ChainedReader implements Reader {
             Reader current = currentReader.get();
             if (current != null) {
                 try {
-                    logger.info("Stopping the {} reader", current.name());
+                    logger.info("ChainedReader: Stopping the {} reader", current.name());
                     current.stop();
-                } catch (Throwable t) {
+                }
+                catch (Throwable t) {
                     logger.error("Unexpected error stopping the {} reader", current.name(), t);
                 }
             }
@@ -168,7 +169,8 @@ public final class ChainedReader implements Reader {
                         logger.info(completionMessage);
                     }
                 }
-            } finally {
+            }
+            finally {
                 // And since this is the last reader, make sure this chain is also stopped ...
                 completed.set(true);
                 running.set(false);
@@ -196,8 +198,9 @@ public final class ChainedReader implements Reader {
         // There is at least one more reader, so start it ...
         Reader lastReader = currentReader.getAndSet(null);
         if (lastReader != null) {
-            logger.debug("Transitioning from the {} reader to the {} reader", lastReader.name(), reader.name());
-        } else {
+            logger.info("Transitioning from the {} reader to the {} reader", lastReader.name(), reader.name());
+        }
+        else {
             logger.debug("Starting the {} reader", reader.name());
         }
         reader.start();

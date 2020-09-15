@@ -60,7 +60,9 @@ import io.debezium.util.Strings;
 @Immutable
 public interface Configuration {
 
-    public static final Pattern PASSWORD_PATTERN = Pattern.compile(".*password$|.*sasl\\.jaas\\.config$", Pattern.CASE_INSENSITIVE);
+    Logger CONFIGURATION_LOGGER = LoggerFactory.getLogger(Configuration.class);
+
+    Pattern PASSWORD_PATTERN = Pattern.compile(".*password$|.*sasl\\.jaas\\.config$", Pattern.CASE_INSENSITIVE);
 
     /**
      * The basic interface for configuration builders.
@@ -704,7 +706,9 @@ public interface Configuration {
 
         protected Builder changeString(String key, String defaultValue, Function<String, String> function) {
             String existing = props.getProperty(key);
-            if (existing == null) existing = defaultValue;
+            if (existing == null) {
+                existing = defaultValue;
+            }
             String newValue = function.apply(existing);
             return with(key, newValue);
         }
@@ -777,7 +781,9 @@ public interface Configuration {
      */
     public static Configuration from(Properties properties) {
         Properties props = new Properties();
-        if (properties != null) props.putAll(properties);
+        if (properties != null) {
+            props.putAll(properties);
+        }
         return new Configuration() {
             @Override
             public String getString(String key) {
@@ -805,7 +811,9 @@ public interface Configuration {
      */
     public static Configuration from(Map<String, ?> properties) {
         return from(properties, value -> {
-            if (value == null) return null;
+            if (value == null) {
+                return null;
+            }
             if (value instanceof Collection<?>) {
                 return Strings.join(",", (List<?>) value);
             }
@@ -824,7 +832,9 @@ public interface Configuration {
      */
     public static <T> Configuration from(Map<String, T> properties, Function<T, String> conversion) {
         Map<String, Object> props = new HashMap<>();
-        if (properties != null) props.putAll(properties);
+        if (properties != null) {
+            props.putAll(properties);
+        }
         return new Configuration() {
             @Override
             public String getString(String key) {
@@ -881,7 +891,8 @@ public interface Configuration {
             Properties properties = new Properties();
             properties.load(stream);
             return from(properties);
-        } finally {
+        }
+        finally {
             stream.close();
         }
     }
@@ -898,7 +909,8 @@ public interface Configuration {
             Properties properties = new Properties();
             properties.load(reader);
             return from(properties);
-        } finally {
+        }
+        finally {
             reader.close();
         }
     }
@@ -1061,7 +1073,9 @@ public interface Configuration {
      */
     default List<String> getStrings(String key, String regex) {
         String value = getString(key);
-        if (value == null) return null;
+        if (value == null) {
+            return null;
+        }
         return Collect.arrayListOf(value.split(regex));
     }
 
@@ -1166,8 +1180,10 @@ public interface Configuration {
         String value = getString(key);
         if (value != null) {
             try {
-                return Integer.parseInt(value);
-            } catch (NumberFormatException e) {}
+                return Integer.valueOf(value);
+            }
+            catch (NumberFormatException e) {
+            }
         }
         return defaultValueSupplier != null ? defaultValueSupplier.getAsInt() : null;
     }
@@ -1186,8 +1202,10 @@ public interface Configuration {
         String value = getString(key);
         if (value != null) {
             try {
-                return Long.parseLong(value);
-            } catch (NumberFormatException e) {}
+                return Long.valueOf(value);
+            }
+            catch (NumberFormatException e) {
+            }
         }
         return defaultValueSupplier != null ? defaultValueSupplier.getAsLong() : null;
     }
@@ -1206,8 +1224,12 @@ public interface Configuration {
         String value = getString(key);
         if (value != null) {
             value = value.trim().toLowerCase();
-            if (Boolean.valueOf(value)) return Boolean.TRUE;
-            if (value.equals("false")) return false;
+            if (Boolean.valueOf(value)) {
+                return Boolean.TRUE;
+            }
+            if (value.equals("false")) {
+                return false;
+            }
         }
         return defaultValueSupplier != null ? defaultValueSupplier.getAsBoolean() : null;
     }
@@ -1409,7 +1431,7 @@ public interface Configuration {
      *
      * @param key the key for the configuration property
      * @param clazz the Class of which the resulting object is expected to be an instance of; may not be null
-     * @param the {@link Configuration} object that is passed as a parameter to the constructor
+     * @param configuration {@link Configuration} object that is passed as a parameter to the constructor
      * @return the new instance, or null if there is no such key-value pair in the configuration or if there is a key-value
      *         configuration but the value could not be converted to an existing class with a zero-argument constructor
      */
@@ -1449,7 +1471,7 @@ public interface Configuration {
      *
      * @param field the field for the configuration property
      * @param clazz the Class of which the resulting object is expected to be an instance of; may not be null
-     * @param the {@link Configuration} object that is passed as a parameter to the constructor
+     * @param configuration the {@link Configuration} object that is passed as a parameter to the constructor
      * @return the new instance, or null if there is no such key-value pair in the configuration or if there is a key-value
      *         configuration but the value could not be converted to an existing class with a zero-argument constructor
      */
@@ -1471,9 +1493,13 @@ public interface Configuration {
      * @return the subset of this Configuration; never null
      */
     default Configuration subset(String prefix, boolean removePrefix) {
-        if (prefix == null) return this;
+        if (prefix == null) {
+            return this;
+        }
         prefix = prefix.trim();
-        if (prefix.isEmpty()) return this;
+        if (prefix.isEmpty()) {
+            return this;
+        }
         String prefixWithSeparator = prefix.endsWith(".") ? prefix : prefix + ".";
         int minLength = prefixWithSeparator.length();
         Function<String, String> prefixRemover = removePrefix ? key -> key.substring(minLength) : key -> key;
@@ -1487,7 +1513,9 @@ public interface Configuration {
      * @return the subset Configuration; never null
      */
     default Configuration map(Function<String, String> mapper) {
-        if (mapper == null) return this;
+        if (mapper == null) {
+            return this;
+        }
         Map<String, String> newToOld = new HashMap<>();
         keys().stream().filter(k -> k != null).forEach(oldKey -> {
             String newKey = mapper.apply(oldKey);
@@ -1521,14 +1549,16 @@ public interface Configuration {
      * @return the subset Configuration; never null
      */
     default Configuration filter(Predicate<? super String> matcher) {
-        if (matcher == null) return this;
+        if (matcher == null) {
+            return this;
+        }
         return new Configuration() {
             @Override
             public Set<String> keys() {
                 return Collect.unmodifiableSet(Configuration.this.keys().stream()
-                                                                 .filter(k -> k != null)
-                                                                 .filter(matcher)
-                                                                 .collect(Collectors.toSet()));
+                        .filter(k -> k != null)
+                        .filter(matcher)
+                        .collect(Collectors.toSet()));
             }
 
             @Override
@@ -1550,7 +1580,9 @@ public interface Configuration {
      * @return the Configuration with mapped values; never null
      */
     default Configuration mapped(BiFunction<? super String, ? super String, String> mapper) {
-        if (mapper == null) return this;
+        if (mapper == null) {
+            return this;
+        }
         return new Configuration() {
             @Override
             public Set<String> keys() {
@@ -1628,7 +1660,9 @@ public interface Configuration {
      * @return the Configuration with masked values for matching keys; never null
      */
     default Configuration withMasked(String keyRegex) {
-        if (keyRegex == null) return this;
+        if (keyRegex == null) {
+            return this;
+        }
         return withMasked(Pattern.compile(keyRegex));
     }
 
@@ -1640,7 +1674,9 @@ public interface Configuration {
      * @return the Configuration with masked values for matching keys; never null
      */
     default Configuration withMasked(Pattern keyRegex) {
-        if (keyRegex == null) return this;
+        if (keyRegex == null) {
+            return this;
+        }
         return new Configuration() {
             @Override
             public Set<String> keys() {
@@ -1689,7 +1725,9 @@ public interface Configuration {
         // Add all values as-is ...
         keys().forEach(key -> {
             String value = getString(key);
-            if (key != null && value != null) props.setProperty(key, value);
+            if (key != null && value != null) {
+                props.setProperty(key, value);
+            }
         });
         if (fields != null) {
             // Add the default values ...
@@ -1720,7 +1758,9 @@ public interface Configuration {
         // Add all values as-is ...
         keys().forEach(key -> {
             String value = getString(key);
-            if (key != null && value != null) props.put(key, value);
+            if (key != null && value != null) {
+                props.put(key, value);
+            }
         });
         if (fields != null) {
             // Add the default values ...
@@ -1788,7 +1828,9 @@ public interface Configuration {
     default boolean validate(Iterable<Field> fields, ValidationOutput problems) {
         boolean valid = true;
         for (Field field : fields) {
-            if (!field.validate(this, problems)) valid = false;
+            if (!field.validate(this, problems)) {
+                valid = false;
+            }
         }
         return valid;
     }
@@ -1805,12 +1847,14 @@ public interface Configuration {
         return validate(fields, (f, v, problem) -> {
             if (v == null) {
                 problems.accept("The '" + f.name() + "' value is invalid: " + problem);
-            } else {
+            }
+            else {
                 String valueStr = v.toString();
                 if (v instanceof CharSequence) {
                     if (PASSWORD_PATTERN.matcher((CharSequence) v).matches()) {
                         valueStr = "********"; // mask any fields that we know are passwords
-                    } else {
+                    }
+                    else {
                         valueStr = "'" + valueStr + "'";
                     }
                 }
@@ -1910,10 +1954,11 @@ public interface Configuration {
     default <T> void forEachMatchingFieldNameWithInteger(Pattern regex, int groupNumber, BiConsumer<String, Integer> function) {
         BiFunction<String, String, Integer> extractor = (fieldName, strValue) -> {
             try {
-                return Integer.parseInt(strValue);
-            } catch (NumberFormatException e) {
+                return Integer.valueOf(strValue);
+            }
+            catch (NumberFormatException e) {
                 LoggerFactory.getLogger(getClass()).error("Unexpected value {} extracted from configuration field '{}' using regex '{}'",
-                                                          strValue, fieldName, regex);
+                        strValue, fieldName, regex);
                 return null;
             }
         };
@@ -1958,9 +2003,10 @@ public interface Configuration {
         BiFunction<String, String, Boolean> extractor = (fieldName, strValue) -> {
             try {
                 return Boolean.parseBoolean(strValue);
-            } catch (NumberFormatException e) {
+            }
+            catch (NumberFormatException e) {
                 LoggerFactory.getLogger(getClass()).error("Unexpected value {} extracted from configuration field '{}' using regex '{}'",
-                                                          strValue, fieldName, regex);
+                        strValue, fieldName, regex);
                 return null;
             }
         };
@@ -2037,7 +2083,9 @@ public interface Configuration {
             if (matcher.matches()) {
                 String groupValue = matcher.group(groupNumber);
                 T extractedValue = groupExtractor.apply(fieldName, groupValue);
-                if (extractedValue != null) function.accept(fieldValue, extractedValue);
+                if (extractedValue != null) {
+                    function.accept(fieldValue, extractedValue);
+                }
             }
         });
     }
@@ -2051,4 +2099,44 @@ public interface Configuration {
     default <T> void forEach(BiConsumer<String, String> function) {
         this.asMap().forEach(function);
     }
+
+    /**
+     * Returns the string config value from newProperty config field if it's set or its default value when it's not
+     * set/null.If both are null it returns the value of the oldProperty config field, or its default value when it's
+     * null.
+     * This fallback only works for newProperty fields that have a null / not-set default value!
+     *
+     * @param newProperty the new property config field
+     * @param oldProperty the old / fallback property config field
+     * @return the evaluated value
+     */
+    default String getFallbackStringProperty(Field newProperty, Field oldProperty) {
+        return Configuration.getFallbackStringProperty(this, newProperty, oldProperty);
+    }
+
+    /**
+     * Returns the string config value of the provided Configuration from newProperty config field if it's set or its
+     * default value when it's not set/null.If both are null it returns the value of the oldProperty config field, or
+     * its default value when it's null.
+     * This fallback only works for newProperty fields that have a null / not-set default value!
+     *
+     * @param newProperty the new property config field
+     * @param oldProperty the old / fallback property config field
+     * @return the evaluated value
+     */
+    static String getFallbackStringProperty(Configuration config, Field newProperty, Field oldProperty) {
+        if (null != config.getString(oldProperty.name()) && null != config.getString(newProperty.name())) { // both are set
+            CONFIGURATION_LOGGER.warn("Provided configuration has deprecated property \"" + oldProperty.name()
+                    + "\" and new property \"" + newProperty.name() + "\" set. Using value from \"" + newProperty.name() + "\"!");
+        }
+        return config.getString(
+                newProperty,
+                () -> {
+                    CONFIGURATION_LOGGER.warn("Using configuration property \"" + oldProperty.name()
+                            + "\" is deprecated and will be removed in future versions. Please use \"" + newProperty.name()
+                            + "\" instead.");
+                    return config.getString(oldProperty);
+                });
+    }
+
 }

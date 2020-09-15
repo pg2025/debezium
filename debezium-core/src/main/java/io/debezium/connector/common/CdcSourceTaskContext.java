@@ -5,8 +5,13 @@
  */
 package io.debezium.connector.common;
 
+import java.util.Collection;
+import java.util.Collections;
+import java.util.function.Supplier;
+
 import org.apache.kafka.connect.source.SourceTask;
 
+import io.debezium.schema.DataCollectionId;
 import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext;
 
@@ -21,9 +26,15 @@ public class CdcSourceTaskContext {
     private final String connectorName;
     private final Clock clock;
 
-    public CdcSourceTaskContext(String connectorType, String connectorName) {
+    /**
+     * Obtains the data collections captured at the point of invocation.
+     */
+    private final Supplier<Collection<? extends DataCollectionId>> collectionsSupplier;
+
+    public CdcSourceTaskContext(String connectorType, String connectorName, Supplier<Collection<? extends DataCollectionId>> collectionsSupplier) {
         this.connectorType = connectorType;
         this.connectorName = connectorName;
+        this.collectionsSupplier = collectionsSupplier != null ? collectionsSupplier : Collections::emptyList;
 
         this.clock = Clock.system();
     }
@@ -44,5 +55,20 @@ public class CdcSourceTaskContext {
      */
     public Clock getClock() {
         return clock;
+    }
+
+    public String[] capturedDataCollections() {
+        return collectionsSupplier.get()
+                .stream()
+                .map(DataCollectionId::toString)
+                .toArray(String[]::new);
+    }
+
+    public String getConnectorType() {
+        return connectorType;
+    }
+
+    public String getConnectorName() {
+        return connectorName;
     }
 }

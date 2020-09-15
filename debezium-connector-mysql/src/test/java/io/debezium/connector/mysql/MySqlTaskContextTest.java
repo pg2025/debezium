@@ -16,8 +16,11 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.config.Configuration;
+import io.debezium.connector.AbstractSourceInfo;
+import io.debezium.connector.mysql.MySqlConnectorConfig.GtidNewChannelPosition;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SecureConnectionMode;
 import io.debezium.connector.mysql.MySqlConnectorConfig.SnapshotMode;
+import io.debezium.doc.FixFor;
 import io.debezium.document.Document;
 import io.debezium.relational.history.FileDatabaseHistory;
 import io.debezium.relational.history.HistoryRecord;
@@ -47,11 +50,14 @@ public class MySqlTaskContextTest {
     @Before
     public void beforeEach() {
         hostname = System.getProperty("database.hostname");
-        if (hostname == null) hostname = "localhost";
+        if (hostname == null) {
+            hostname = "localhost";
+        }
         String portStr = System.getProperty("database.port");
         if (portStr != null) {
             port = Integer.parseInt(portStr);
-        } else {
+        }
+        else {
             port = (Integer) MySqlConnectorConfig.PORT.defaultValue();
         }
         username = "snapper";
@@ -67,7 +73,8 @@ public class MySqlTaskContextTest {
         if (context != null) {
             try {
                 context.shutdown();
-            } finally {
+            }
+            finally {
                 context = null;
                 Testing.Files.delete(DB_HISTORY_PATH);
             }
@@ -76,23 +83,23 @@ public class MySqlTaskContextTest {
 
     protected Configuration.Builder simpleConfig() {
         return Configuration.create()
-                            .with(MySqlConnectorConfig.HOSTNAME, hostname)
-                            .with(MySqlConnectorConfig.PORT, port)
-                            .with(MySqlConnectorConfig.USER, username)
-                            .with(MySqlConnectorConfig.PASSWORD, password)
-                            .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
-                            .with(MySqlConnectorConfig.SERVER_ID, serverId)
-                            .with(MySqlConnectorConfig.SERVER_NAME, serverName)
-                            .with(MySqlConnectorConfig.DATABASE_WHITELIST, databaseName)
-                            .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
-                            .with(FileDatabaseHistory.FILE_PATH, DB_HISTORY_PATH);
+                .with(MySqlConnectorConfig.HOSTNAME, hostname)
+                .with(MySqlConnectorConfig.PORT, port)
+                .with(MySqlConnectorConfig.USER, username)
+                .with(MySqlConnectorConfig.PASSWORD, password)
+                .with(MySqlConnectorConfig.SSL_MODE, SecureConnectionMode.DISABLED)
+                .with(MySqlConnectorConfig.SERVER_ID, serverId)
+                .with(MySqlConnectorConfig.SERVER_NAME, serverName)
+                .with(MySqlConnectorConfig.DATABASE_INCLUDE_LIST, databaseName)
+                .with(MySqlConnectorConfig.DATABASE_HISTORY, FileDatabaseHistory.class)
+                .with(FileDatabaseHistory.FILE_PATH, DB_HISTORY_PATH);
     }
 
     @Test
     public void shouldCreateTaskFromConfigurationWithNeverSnapshotMode() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, SnapshotMode.NEVER)
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         assertThat("" + context.snapshotMode().getValue()).isEqualTo(SnapshotMode.NEVER.getValue());
@@ -103,8 +110,8 @@ public class MySqlTaskContextTest {
     @Test
     public void shouldCreateTaskFromConfigurationWithWhenNeededSnapshotMode() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, SnapshotMode.WHEN_NEEDED)
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         assertThat("" + context.snapshotMode().getValue()).isEqualTo(SnapshotMode.WHEN_NEEDED.getValue());
@@ -113,10 +120,29 @@ public class MySqlTaskContextTest {
     }
 
     @Test
+    public void shouldFilterInternalDmlStatementsUsingDefaultFilter() throws Exception {
+        config = simpleConfig().build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
+
+        assertThat(context.ddlFilter().test("INSERT INTO mysql.rds_heartbeat2(name) values ('innodb_txn_key') ON DUPLICATE KEY UPDATE value = 'v'")).isTrue();
+        assertThat(context.ddlFilter().test("INSERT INTO mysql.rds_sysinfo(name, value) values ('innodb_txn_key','Sat Jun 13 06:26:02 UTC 2020')")).isTrue();
+        assertThat(context.ddlFilter().test("INSERT INTO mysql.rds_monitor(name, value) values ('innodb_txn_key','Sat Jun 13 06:26:02 UTC 2020')")).isTrue();
+        assertThat(context.ddlFilter().test("INSERT INTO mysql.rds_monitor(name) values ('innodb_txn_key') ON DUPLICATE KEY UPDATE value = 'v'")).isTrue();
+        assertThat(context.ddlFilter().test("DELETE FROM mysql.rds_sysinfo")).isTrue();
+        assertThat(context.ddlFilter().test("DELETE FROM mysql.rds_monitor;")).isTrue();
+        assertThat(context.ddlFilter().test("FLUSH RELAY LOGS;")).isTrue();
+        assertThat(context.ddlFilter().test("SAVEPOINT x")).isTrue();
+        // Missing 'ON DUPLICATE ...' clause
+        assertThat(context.ddlFilter().test("INSERT INTO mysql.rds_heartbeat2(name) values ('innodb_txn_key')")).isFalse();
+        // No space after 'SAVEPOINT'
+        assertThat(context.ddlFilter().test("SAVEPOINT;")).isFalse();
+    }
+
+    @Test
     public void shouldUseGtidSetIncludes() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_INCLUDES, "a,b,c,d.*")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         Predicate<String> filter = context.gtidSourceFilter();
@@ -141,9 +167,9 @@ public class MySqlTaskContextTest {
                 + "7145bf69-d1ca-11e5-a588-0242ac110004:1-3200,"
                 + "7c1de3f2-3fd2-11e6-9cdc-42010af000bc:1-41";
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_INCLUDES,
-                                     "036d85a9-64e5-11e6-9b48-42010af0000c,7145bf69-d1ca-11e5-a588-0242ac110004")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                "036d85a9-64e5-11e6-9b48-42010af0000c,7145bf69-d1ca-11e5-a588-0242ac110004")
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         Predicate<String> filter = context.gtidSourceFilter();
@@ -171,9 +197,9 @@ public class MySqlTaskContextTest {
                 + "7145bf69-d1ca-11e5-a588-0242ac110004:1-3200,"
                 + "7c1de3f2-3fd2-11e6-9cdc-42010af000bc:1-41";
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_EXCLUDES,
-                                     "7c1de3f2-3fd2-11e6-9cdc-42010af000bc")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                "7c1de3f2-3fd2-11e6-9cdc-42010af000bc")
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         Predicate<String> filter = context.gtidSourceFilter();
@@ -198,12 +224,13 @@ public class MySqlTaskContextTest {
     @Test
     public void shouldNotAllowBothGtidSetIncludesAndExcludes() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_INCLUDES,
-                                     "036d85a9-64e5-11e6-9b48-42010af0000c,7145bf69-d1ca-11e5-a588-0242ac110004")
-                               .with(MySqlConnectorConfig.GTID_SOURCE_EXCLUDES,
-                                     "7c1de3f2-3fd2-11e6-9cdc-42010af000bc:1-41")
-                               .build();
-        context = new MySqlTaskContext(config, false);
-        boolean valid = config.validateAndRecord(MySqlConnectorConfig.ALL_FIELDS, msg -> {});
+                "036d85a9-64e5-11e6-9b48-42010af0000c,7145bf69-d1ca-11e5-a588-0242ac110004")
+                .with(MySqlConnectorConfig.GTID_SOURCE_EXCLUDES,
+                        "7c1de3f2-3fd2-11e6-9cdc-42010af000bc:1-41")
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
+        boolean valid = config.validateAndRecord(MySqlConnectorConfig.ALL_FIELDS, msg -> {
+        });
         assertThat(valid).isFalse();
     }
 
@@ -214,14 +241,19 @@ public class MySqlTaskContextTest {
         String availableServerGtidStr = "036d85a9-64e5-11e6-9b48-42010af0000c:1-20,"
                 + "7145bf69-d1ca-11e5-a588-0242ac110004:1-3200,"
                 + "123e4567-e89b-12d3-a456-426655440000:1-41";
+        String purgedServerGtidStr = "";
+
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_INCLUDES,
-                                     "036d85a9-64e5-11e6-9b48-42010af0000c")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                "036d85a9-64e5-11e6-9b48-42010af0000c")
+                .with(MySqlConnectorConfig.GTID_NEW_CHANNEL_POSITION, GtidNewChannelPosition.LATEST)
+                .build();
+        config.validateAndRecord(MySqlConnectorConfig.ALL_FIELDS, msg -> {
+        });
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
         context.source().setCompletedGtidSet(gtidStr);
 
-        GtidSet mergedGtidSet = context.filterGtidSet(new GtidSet(availableServerGtidStr));
+        GtidSet mergedGtidSet = context.filterGtidSet(new GtidSet(availableServerGtidStr), new GtidSet(purgedServerGtidStr));
         assertThat(mergedGtidSet).isNotNull();
         GtidSet.UUIDSet uuidSet1 = mergedGtidSet.forServerWithId("036d85a9-64e5-11e6-9b48-42010af0000c");
         GtidSet.UUIDSet uuidSet2 = mergedGtidSet.forServerWithId("7145bf69-d1ca-11e5-a588-0242ac110004");
@@ -235,6 +267,39 @@ public class MySqlTaskContextTest {
     }
 
     @Test
+    @FixFor("DBZ-923")
+    public void shouldMergeToFirstAvailableGtidSetPositions() throws Exception {
+        String gtidStr = "036d85a9-64e5-11e6-9b48-42010af0000c:1-2,"
+                + "7c1de3f2-3fd2-11e6-9cdc-42010af000bc:5-41";
+
+        String availableServerGtidStr = "036d85a9-64e5-11e6-9b48-42010af0000c:1-20,"
+                + "7145bf69-d1ca-11e5-a588-0242ac110004:1-3200,"
+                + "123e4567-e89b-12d3-a456-426655440000:1-41";
+
+        String purgedServerGtidStr = "7145bf69-d1ca-11e5-a588-0242ac110004:1-1234";
+
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.GTID_SOURCE_INCLUDES, "036d85a9-64e5-11e6-9b48-42010af0000c")
+                .build();
+
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
+        context.start();
+        context.source().setCompletedGtidSet(gtidStr);
+
+        GtidSet mergedGtidSet = context.filterGtidSet(new GtidSet(availableServerGtidStr), new GtidSet(purgedServerGtidStr));
+        assertThat(mergedGtidSet).isNotNull();
+        GtidSet.UUIDSet uuidSet1 = mergedGtidSet.forServerWithId("036d85a9-64e5-11e6-9b48-42010af0000c");
+        GtidSet.UUIDSet uuidSet2 = mergedGtidSet.forServerWithId("7145bf69-d1ca-11e5-a588-0242ac110004");
+        GtidSet.UUIDSet uuidSet3 = mergedGtidSet.forServerWithId("123e4567-e89b-12d3-a456-426655440000");
+        GtidSet.UUIDSet uuidSet4 = mergedGtidSet.forServerWithId("7c1de3f2-3fd2-11e6-9cdc-42010af000bc");
+
+        assertThat(uuidSet1.getIntervals()).isEqualTo(Arrays.asList(new GtidSet.Interval(1, 2)));
+        assertThat(uuidSet2.getIntervals()).isEqualTo(Arrays.asList(new GtidSet.Interval(1, 1234)));
+        assertThat(uuidSet3).isNull();
+        assertThat(uuidSet4).isNull();
+    }
+
+    @Test
     public void shouldComparePositionsWithDifferentFields() {
         String lastGtidStr = "01261278-6ade-11e6-b36a-42010af00790:1-400944168,"
                 + "30efb117-e42a-11e6-ba9e-42010a28002e:1-9,"
@@ -244,8 +309,8 @@ public class MySqlTaskContextTest {
                 + "c627b2bc-9647-11e6-a886-42010af0044a:1-10426868,"
                 + "d079cbb3-750f-11e6-954e-42010af00c28:1-11544291:11544293-11885648";
         config = simpleConfig().with(MySqlConnectorConfig.GTID_SOURCE_EXCLUDES, "96c2072e-e428-11e6-9590-42010a28002d")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
         context.source().setCompletedGtidSet(lastGtidStr);
         HistoryRecordComparator comparator = context.dbSchema().historyComparator();
@@ -271,8 +336,8 @@ public class MySqlTaskContextTest {
     @Test
     public void shouldIgnoreDatabaseHistoryProperties() throws Exception {
         config = simpleConfig().with(KafkaDatabaseHistory.TOPIC, "dummytopic")
-                               .build();
-        context = new MySqlTaskContext(config, false);
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build(), false, null);
         context.start();
 
         context.getConnectionContext().jdbc().config().forEach((k, v) -> {
@@ -282,9 +347,9 @@ public class MySqlTaskContextTest {
 
     protected HistoryRecord historyRecord(String serverName, String binlogFilename, int position, String gtids,
                                           int event, int row, boolean snapshot) {
-        Document source = Document.create(SourceInfo.SERVER_NAME_KEY, serverName);
+        Document source = Document.create(AbstractSourceInfo.SERVER_NAME_KEY, serverName);
         Document pos = Document.create(SourceInfo.BINLOG_FILENAME_OFFSET_KEY, binlogFilename,
-                                       SourceInfo.BINLOG_POSITION_OFFSET_KEY, position);
+                SourceInfo.BINLOG_POSITION_OFFSET_KEY, position);
         if (row >= 0) {
             pos = pos.set(SourceInfo.BINLOG_ROW_IN_EVENT_OFFSET_KEY, row);
         }
@@ -298,7 +363,7 @@ public class MySqlTaskContextTest {
             pos = pos.set(SourceInfo.SNAPSHOT_KEY, true);
         }
         return new HistoryRecord(Document.create(HistoryRecord.Fields.SOURCE, source,
-                                                 HistoryRecord.Fields.POSITION, pos));
+                HistoryRecord.Fields.POSITION, pos));
     }
 
 }

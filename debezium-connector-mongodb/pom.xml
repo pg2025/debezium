@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.8.0-SNAPSHOT</version>
+        <version>1.3.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -78,6 +78,11 @@
             <artifactId>kafka-connect-avro-converter</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
     <properties>
         <!-- By default we need to run these 5 containers, although the two init containers exit quickly -->
@@ -130,7 +135,7 @@
                   </image>
                   <!-- A container that initiates the data replica set and adds it as shard to router -->
                   <image>
-                    <name>debezium/mongo-initiator:3.2</name>
+                    <name>debezium/mongo-initiator:${version.mongo.server}</name>
                     <run>
                       <namingStrategy>none</namingStrategy>
                       <env>
@@ -246,6 +251,7 @@
                     <plugin>
                         <groupId>org.apache.maven.plugins</groupId>
                         <artifactId>maven-assembly-plugin</artifactId>
+                        <version>${version.assembly.plugin}</version>
                         <dependencies>
                             <dependency>
                                 <groupId>io.debezium</groupId>
@@ -264,8 +270,9 @@
                                     <finalName>${project.artifactId}-${project.version}</finalName>
                                     <attach>true</attach>  <!-- we want attach & deploy these to Maven -->
                                     <descriptorRefs>
-                                        <descriptorRef>connector-distribution</descriptorRef>
+                                        <descriptorRef>${assembly.descriptor}</descriptorRef>
                                     </descriptorRefs>
+                                    <tarLongFileMode>posix</tarLongFileMode>
                                 </configuration>
                             </execution>
                         </executions>

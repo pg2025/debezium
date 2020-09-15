@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -58,9 +59,13 @@ public class ConnectionContext implements AutoCloseable {
         this.useHostsAsSeeds = config.getBoolean(MongoDbConnectorConfig.AUTO_DISCOVER_MEMBERS);
         final String username = config.getString(MongoDbConnectorConfig.USER);
         final String password = config.getString(MongoDbConnectorConfig.PASSWORD);
-        final String adminDbName = ReplicaSetDiscovery.ADMIN_DATABASE_NAME;
+        final String adminDbName = config.getString(MongoDbConnectorConfig.AUTH_SOURCE);
         final boolean useSSL = config.getBoolean(MongoDbConnectorConfig.SSL_ENABLED);
         final boolean sslAllowInvalidHostnames = config.getBoolean(MongoDbConnectorConfig.SSL_ALLOW_INVALID_HOSTNAMES);
+
+        final int connectTimeoutMs = config.getInteger(MongoDbConnectorConfig.CONNECT_TIMEOUT_MS);
+        final int socketTimeoutMs = config.getInteger(MongoDbConnectorConfig.SOCKET_TIMEOUT_MS);
+        final int serverSelectionTimeoutMs = config.getInteger(MongoDbConnectorConfig.SERVER_SELECTION_TIMEOUT_MS);
 
         // Set up the client pool so that it ...
         MongoClients.Builder clientBuilder = MongoClients.create();
@@ -70,6 +75,12 @@ public class ConnectionContext implements AutoCloseable {
         if (useSSL) {
             clientBuilder.options().sslEnabled(true).sslInvalidHostNameAllowed(sslAllowInvalidHostnames);
         }
+
+        clientBuilder.options()
+                .serverSelectionTimeout(serverSelectionTimeoutMs)
+                .socketTimeout(socketTimeoutMs)
+                .connectTimeout(connectTimeoutMs);
+
         pool = clientBuilder.build();
 
         this.replicaSets = ReplicaSets.parse(hosts());
@@ -84,7 +95,8 @@ public class ConnectionContext implements AutoCloseable {
             // Closing all connections ...
             logger().info("Closing all connections to {}", replicaSets);
             pool.clear();
-        } catch (Throwable e) {
+        }
+        catch (Throwable e) {
             logger().error("Unexpected error shutting down the MongoDB clients", e);
         }
     }
@@ -120,7 +132,7 @@ public class ConnectionContext implements AutoCloseable {
     }
 
     public MongoClient clientFor(List<ServerAddress> addresses) {
-        if ( this.useHostsAsSeeds || addresses.isEmpty() ) {
+        if (this.useHostsAsSeeds || addresses.isEmpty()) {
             return pool.clientForMembers(addresses);
         }
         return pool.clientFor(addresses.get(0));
@@ -130,8 +142,14 @@ public class ConnectionContext implements AutoCloseable {
         return config.getString(MongoDbConnectorConfig.HOSTS);
     }
 
-    public int pollPeriodInSeconds() {
-        return config.getInteger(MongoDbConnectorConfig.POLL_INTERVAL_SEC);
+    public Duration pollInterval() {
+        if (config.hasKey(MongoDbConnectorConfig.MONGODB_POLL_INTERVAL_MS.name())) {
+            return Duration.ofMillis(config.getLong(MongoDbConnectorConfig.MONGODB_POLL_INTERVAL_MS));
+        }
+        if (config.hasKey(MongoDbConnectorConfig.POLL_INTERVAL_SEC.name())) {
+            logger.warn("The option `mongodb.poll.interval.sec` is deprecated. Use `mongodb.poll.interval.ms` instead.");
+        }
+        return Duration.ofSeconds(config.getInteger(MongoDbConnectorConfig.POLL_INTERVAL_SEC));
     }
 
     public int maxConnectionAttemptsForPrimary() {
@@ -167,9 +185,10 @@ public class ConnectionContext implements AutoCloseable {
         return primaryClientFor(replicaSet, (attempts, remaining, error) -> {
             if (error == null) {
                 logger().info("Unable to connect to primary node of '{}' after attempt #{} ({} remaining)", replicaSet, attempts, remaining);
-            } else {
+            }
+            else {
                 logger().error("Error while attempting to connect to primary node of '{}' after attempt #{} ({} remaining): {}", replicaSet,
-                             attempts, remaining, error.getMessage(), error);
+                        attempts, remaining, error.getMessage(), error);
             }
         });
     }
@@ -193,8 +212,11 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     // Try to get the primary
                     primary = factory.get();
-                    if (primary != null) break;
-                } catch (Throwable t) {
+                    if (primary != null) {
+                        break;
+                    }
+                }
+                catch (Throwable t) {
                     handler.failed(attempts, maxAttempts - attempts, t);
                 }
                 if (attempts > maxAttempts) {
@@ -222,6 +244,7 @@ public class ConnectionContext implements AutoCloseable {
         private final Supplier<MongoClient> primaryConnectionSupplier;
         private final Filters filters;
         private final BiConsumer<String, Throwable> errorHandler;
+        private final AtomicBoolean running = new AtomicBoolean(true);
 
         protected MongoPrimary(ConnectionContext context, ReplicaSet replicaSet, Filters filters, BiConsumer<String, Throwable> errorHandler) {
             this.replicaSet = replicaSet;
@@ -270,8 +293,12 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     operation.accept(primary);
                     return;
-                } catch (Throwable t) {
+                }
+                catch (Throwable t) {
                     errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
                     try {
                         errorMetronome.pause();
                     }
@@ -299,6 +326,9 @@ public class ConnectionContext implements AutoCloseable {
                 }
                 catch (Throwable t) {
                     errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
                     try {
                         errorMetronome.pause();
                     }
@@ -324,8 +354,15 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     operation.accept(primary);
                     return;
-                } catch (Throwable t) {
+                }
+                catch (InterruptedException e) {
+                    throw e;
+                }
+                catch (Throwable t) {
                     errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
                     errorMetronome.pause();
                 }
             }
@@ -382,6 +419,17 @@ public class ConnectionContext implements AutoCloseable {
                 return collections;
             });
         }
+
+        private boolean isRunning() {
+            return running.get();
+        }
+
+        /**
+         * Terminates the execution loop of the current primary
+         */
+        public void stop() {
+            running.set(false);
+        }
     }
 
     /**
@@ -394,7 +442,7 @@ public class ConnectionContext implements AutoCloseable {
         MongoClient replicaSetClient = clientForReplicaSet(replicaSet);
         ReplicaSetStatus rsStatus = replicaSetClient.getReplicaSetStatus();
         if (rsStatus == null) {
-            if ( !this.useHostsAsSeeds ) {
+            if (!this.useHostsAsSeeds) {
                 // No replica set status is available, but it may still be a replica set ...
                 return replicaSetClient;
             }

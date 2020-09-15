@@ -12,7 +12,6 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.function.Supplier;
 
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,7 +37,7 @@ import io.debezium.util.Threads.Timer;
  * the queue.
  * <p>
  * If an exception occurs on the producer side, the producer should make that
- * exception known by calling {@link #producerFailure} before stopping its
+ * exception known by calling {@link #producerException(RuntimeException)} before stopping its
  * operation. Upon the next call to {@link #poll()}, that exception will be
  * raised, causing Kafka Connect to stop the connector and mark it as
  * {@code FAILED}.
@@ -51,21 +50,23 @@ import io.debezium.util.Threads.Timer;
  *            producers to the consumer, a custom type wrapping source records
  *            may be used.
  */
-public class ChangeEventQueue<T> {
+public class ChangeEventQueue<T> implements ChangeEventQueueMetrics {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ChangeEventQueue.class);
 
     private final Duration pollInterval;
     private final int maxBatchSize;
+    private final int maxQueueSize;
     private final BlockingQueue<T> queue;
     private final Metronome metronome;
     private final Supplier<PreviousContext> loggingContextSupplier;
 
-    private volatile Throwable producerFailure;
+    private volatile RuntimeException producerException;
 
     private ChangeEventQueue(Duration pollInterval, int maxQueueSize, int maxBatchSize, Supplier<LoggingContext.PreviousContext> loggingContextSupplier) {
         this.pollInterval = pollInterval;
         this.maxBatchSize = maxBatchSize;
+        this.maxQueueSize = maxQueueSize;
         this.queue = new LinkedBlockingDeque<>(maxQueueSize);
         this.metronome = Metronome.sleeper(pollInterval, Clock.SYSTEM);
         this.loggingContextSupplier = loggingContextSupplier;
@@ -144,9 +145,9 @@ public class ChangeEventQueue<T> {
         try {
             LOGGER.debug("polling records...");
             List<T> records = new ArrayList<>();
-            final Timer timeout = Threads.timer(Clock.SYSTEM, Temporals.max(pollInterval, ConfigurationDefaults.RETURN_CONTROL_INTERVAL));
+            final Timer timeout = Threads.timer(Clock.SYSTEM, Temporals.min(pollInterval, ConfigurationDefaults.RETURN_CONTROL_INTERVAL));
             while (!timeout.expired() && queue.drainTo(records, maxBatchSize) == 0) {
-                throwProducerFailureIfPresent();
+                throwProducerExceptionIfPresent();
 
                 LOGGER.debug("no records available yet, sleeping a bit...");
                 // no records yet, so wait a bit
@@ -154,18 +155,29 @@ public class ChangeEventQueue<T> {
                 LOGGER.debug("checking for more records...");
             }
             return records;
-        } finally {
+        }
+        finally {
             previousContext.restore();
         }
     }
 
-    public void producerFailure(final Throwable producerFailure) {
-        this.producerFailure = producerFailure;
+    public void producerException(final RuntimeException producerException) {
+        this.producerException = producerException;
     }
 
-    private void throwProducerFailureIfPresent() {
-        if (producerFailure != null) {
-            throw new ConnectException("An exception ocurred in the change event producer. This connector will be stopped.", producerFailure);
+    private void throwProducerExceptionIfPresent() {
+        if (producerException != null) {
+            throw producerException;
         }
+    }
+
+    @Override
+    public int totalCapacity() {
+        return maxQueueSize;
+    }
+
+    @Override
+    public int remainingCapacity() {
+        return queue.remainingCapacity();
     }
 }

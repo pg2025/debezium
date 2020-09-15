@@ -6,10 +6,10 @@
 
 package io.debezium.connector.postgresql;
 
+import java.nio.charset.Charset;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.kafka.connect.errors.ConnectException;
@@ -17,12 +17,28 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.DebeziumException;
 import io.debezium.config.Configuration;
 import io.debezium.config.Field;
 import io.debezium.connector.base.ChangeEventQueue;
 import io.debezium.connector.common.BaseSourceTask;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
+import io.debezium.connector.postgresql.connection.ReplicationConnection;
+import io.debezium.connector.postgresql.spi.SlotCreationResult;
+import io.debezium.connector.postgresql.spi.SlotState;
+import io.debezium.connector.postgresql.spi.Snapshotter;
+import io.debezium.heartbeat.Heartbeat;
+import io.debezium.pipeline.ChangeEventSourceCoordinator;
+import io.debezium.pipeline.DataChangeEvent;
+import io.debezium.pipeline.ErrorHandler;
+import io.debezium.pipeline.EventDispatcher;
+import io.debezium.pipeline.metrics.DefaultChangeEventSourceMetricsFactory;
+import io.debezium.relational.TableId;
+import io.debezium.schema.TopicSelector;
+import io.debezium.util.Clock;
 import io.debezium.util.LoggingContext;
+import io.debezium.util.Metronome;
+import io.debezium.util.SchemaNameAdjuster;
 
 /**
  * Kafka connect source task which uses Postgres logical decoding over a streaming replication connection to process DB changes.
@@ -31,135 +47,215 @@ import io.debezium.util.LoggingContext;
  */
 public class PostgresConnectorTask extends BaseSourceTask {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(PostgresConnectorTask.class);
     private static final String CONTEXT_NAME = "postgres-connector-task";
-    private final Logger logger = LoggerFactory.getLogger(getClass());
-    private final AtomicBoolean running = new AtomicBoolean(false);
 
-    private PostgresTaskContext taskContext;
-    private RecordsProducer producer;
-    private volatile long lastProcessedLsn;
-
-    /**
-     * A queue with change events filled by the snapshot and streaming producers, consumed
-     * by Kafka Connect via this task.
-     */
-    private ChangeEventQueue<ChangeEvent> changeEventQueue;
+    private volatile PostgresTaskContext taskContext;
+    private volatile ChangeEventQueue<DataChangeEvent> queue;
+    private volatile PostgresConnection jdbcConnection;
+    private volatile PostgresConnection heartbeatConnection;
+    private volatile ErrorHandler errorHandler;
+    private volatile PostgresSchema schema;
 
     @Override
-    public void start(Configuration config) {
-        if (running.get()) {
-            // already running
-            return;
+    public ChangeEventSourceCoordinator start(Configuration config) {
+        final PostgresConnectorConfig connectorConfig = new PostgresConnectorConfig(config);
+        final TopicSelector<TableId> topicSelector = PostgresTopicSelector.create(connectorConfig);
+        final Snapshotter snapshotter = connectorConfig.getSnapshotter();
+        final SchemaNameAdjuster schemaNameAdjuster = SchemaNameAdjuster.create(LOGGER);
+
+        if (snapshotter == null) {
+            throw new ConnectException("Unable to load snapshotter, if using custom snapshot mode, double check your settings");
         }
 
-        PostgresConnectorConfig connectorConfig = new PostgresConnectorConfig(config);
-
-        // Create type registry
-        TypeRegistry typeRegistry;
-        try (final PostgresConnection connection = new PostgresConnection(connectorConfig.jdbcConfig())) {
-            typeRegistry = connection.getTypeRegistry();
+        // Global JDBC connection used both for snapshotting and streaming.
+        // Must be able to resolve datatypes.
+        jdbcConnection = new PostgresConnection(connectorConfig.jdbcConfig(), true);
+        try {
+            jdbcConnection.setAutoCommit(false);
         }
+        catch (SQLException e) {
+            throw new DebeziumException(e);
+        }
+        heartbeatConnection = new PostgresConnection(connectorConfig.jdbcConfig());
+        final TypeRegistry typeRegistry = jdbcConnection.getTypeRegistry();
+        final Charset databaseCharset = jdbcConnection.getDatabaseCharset();
 
-        // create the task context and schema...
-        PostgresTopicSelector topicSelector = PostgresTopicSelector.create(connectorConfig);
-        PostgresSchema schema = new PostgresSchema(connectorConfig, typeRegistry, topicSelector);
+        schema = new PostgresSchema(connectorConfig, typeRegistry, databaseCharset, topicSelector);
         this.taskContext = new PostgresTaskContext(connectorConfig, schema, topicSelector);
+        final PostgresOffsetContext previousOffset = (PostgresOffsetContext) getPreviousOffset(new PostgresOffsetContext.Loader(connectorConfig));
+        final Clock clock = Clock.system();
 
-        SourceInfo sourceInfo = new SourceInfo(connectorConfig.getLogicalName());
-        Map<String, Object> existingOffset = context.offsetStorageReader().offset(sourceInfo.partition());
         LoggingContext.PreviousContext previousContext = taskContext.configureLoggingContext(CONTEXT_NAME);
         try {
-            //Print out the server information
-            try (PostgresConnection connection = taskContext.createConnection()) {
-                logger.info(connection.serverInfo().toString());
+            // Print out the server information
+            SlotState slotInfo = null;
+            try {
+                if (LOGGER.isInfoEnabled()) {
+                    LOGGER.info(jdbcConnection.serverInfo().toString());
+                }
+                slotInfo = jdbcConnection.getReplicationSlotState(connectorConfig.slotName(), connectorConfig.plugin().getPostgresPluginName());
+            }
+            catch (SQLException e) {
+                LOGGER.warn("unable to load info of replication slot, Debezium will try to create the slot");
             }
 
-            if (existingOffset == null) {
-                logger.info("No previous offset found");
-                if (connectorConfig.snapshotNeverAllowed()) {
-                    logger.info("Snapshots are not allowed as per configuration, starting streaming logical changes only");
-                    producer = new RecordsStreamProducer(taskContext, sourceInfo);
-                } else {
-                    // otherwise we always want to take a snapshot at startup
-                    createSnapshotProducer(taskContext, sourceInfo, connectorConfig.initialOnlySnapshot());
-                }
-            } else {
-                sourceInfo.load(existingOffset);
-                logger.info("Found previous offset {}", sourceInfo);
-                if (sourceInfo.isSnapshotInEffect()) {
-                    if (connectorConfig.snapshotNeverAllowed()) {
-                        // No snapshots are allowed
-                        String msg = "The connector previously stopped while taking a snapshot, but now the connector is configured "
-                                     + "to never allow snapshots. Reconfigure the connector to use snapshots initially or when needed.";
-                        throw new ConnectException(msg);
-                    } else {
-                        logger.info("Found previous incomplete snapshot");
-                        createSnapshotProducer(taskContext, sourceInfo, connectorConfig.initialOnlySnapshot());
+            if (previousOffset == null) {
+                LOGGER.info("No previous offset found");
+                // if we have no initial offset, indicate that to Snapshotter by passing null
+                snapshotter.init(connectorConfig, null, slotInfo);
+            }
+            else {
+                LOGGER.info("Found previous offset {}", previousOffset);
+                snapshotter.init(connectorConfig, previousOffset.asOffsetState(), slotInfo);
+            }
+
+            ReplicationConnection replicationConnection = null;
+            SlotCreationResult slotCreatedInfo = null;
+            if (snapshotter.shouldStream()) {
+                final boolean shouldExport = snapshotter.exportSnapshot();
+                final boolean doSnapshot = snapshotter.shouldSnapshot();
+                replicationConnection = createReplicationConnection(this.taskContext, shouldExport,
+                        doSnapshot, connectorConfig.maxRetries(), connectorConfig.retryDelay());
+
+                // we need to create the slot before we start streaming if it doesn't exist
+                // otherwise we can't stream back changes happening while the snapshot is taking place
+                if (slotInfo == null) {
+                    try {
+                        slotCreatedInfo = replicationConnection.createReplicationSlot().orElse(null);
                     }
-                } else if (connectorConfig.alwaysTakeSnapshot()) {
-                    logger.info("Taking a new snapshot as per configuration");
-                    producer = new RecordsSnapshotProducer(taskContext, sourceInfo, true);
-                } else {
-                    logger.info(
-                            "Previous snapshot has completed successfully, streaming logical changes from last known position");
-                    producer = new RecordsStreamProducer(taskContext, sourceInfo);
+                    catch (SQLException ex) {
+                        String message = "Creation of replication slot failed";
+                        if (ex.getMessage().contains("already exists")) {
+                            message += "; when setting up multiple connectors for the same database host, please make sure to use a distinct replication slot name for each.";
+                        }
+                        throw new DebeziumException(message, ex);
+                    }
+                }
+                else {
+                    slotCreatedInfo = null;
                 }
             }
 
-            changeEventQueue = new ChangeEventQueue.Builder<ChangeEvent>()
-                .pollInterval(connectorConfig.getPollInterval())
-                .maxBatchSize(connectorConfig.getMaxBatchSize())
-                .maxQueueSize(connectorConfig.getMaxQueueSize())
-                .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
-                .build();
+            try {
+                jdbcConnection.commit();
+            }
+            catch (SQLException e) {
+                throw new DebeziumException(e);
+            }
 
-            producer.start(changeEventQueue::enqueue, changeEventQueue::producerFailure);
-            running.compareAndSet(false, true);
-        }  catch (SQLException e) {
-            throw new ConnectException(e);
-        } finally {
+            queue = new ChangeEventQueue.Builder<DataChangeEvent>()
+                    .pollInterval(connectorConfig.getPollInterval())
+                    .maxBatchSize(connectorConfig.getMaxBatchSize())
+                    .maxQueueSize(connectorConfig.getMaxQueueSize())
+                    .loggingContextSupplier(() -> taskContext.configureLoggingContext(CONTEXT_NAME))
+                    .build();
+
+            errorHandler = new PostgresErrorHandler(connectorConfig.getLogicalName(), queue);
+
+            final PostgresEventMetadataProvider metadataProvider = new PostgresEventMetadataProvider();
+
+            Heartbeat heartbeat = Heartbeat.create(connectorConfig.getConfig(), topicSelector.getHeartbeatTopic(),
+                    connectorConfig.getLogicalName(), heartbeatConnection);
+
+            final EventDispatcher<TableId> dispatcher = new EventDispatcher<>(
+                    connectorConfig,
+                    topicSelector,
+                    schema,
+                    queue,
+                    connectorConfig.getTableFilters().dataCollectionFilter(),
+                    DataChangeEvent::new,
+                    PostgresChangeRecordEmitter::updateSchema,
+                    metadataProvider,
+                    heartbeat,
+                    schemaNameAdjuster);
+
+            ChangeEventSourceCoordinator coordinator = new PostgresChangeEventSourceCoordinator(
+                    previousOffset,
+                    errorHandler,
+                    PostgresConnector.class,
+                    connectorConfig,
+                    new PostgresChangeEventSourceFactory(
+                            connectorConfig,
+                            snapshotter,
+                            jdbcConnection,
+                            errorHandler,
+                            dispatcher,
+                            clock,
+                            schema,
+                            taskContext,
+                            replicationConnection,
+                            slotCreatedInfo,
+                            slotInfo),
+                    new DefaultChangeEventSourceMetricsFactory(),
+                    dispatcher,
+                    schema,
+                    snapshotter,
+                    slotInfo);
+
+            coordinator.start(taskContext, this.queue, metadataProvider);
+
+            return coordinator;
+        }
+        finally {
             previousContext.restore();
         }
     }
 
-    private void createSnapshotProducer(PostgresTaskContext taskContext, SourceInfo sourceInfo, boolean initialOnlySnapshot) {
-        if (initialOnlySnapshot) {
-            logger.info("Taking only a snapshot of the DB without streaming any changes afterwards...");
-            producer = new RecordsSnapshotProducer(taskContext, sourceInfo, false);
-        } else {
-            logger.info("Taking a new snapshot of the DB and streaming logical changes once the snapshot is finished...");
-            producer = new RecordsSnapshotProducer(taskContext, sourceInfo, true);
-        }
-    }
+    public ReplicationConnection createReplicationConnection(PostgresTaskContext taskContext, boolean shouldExport,
+                                                             boolean doSnapshot, int maxRetries, Duration retryDelay)
+            throws ConnectException {
+        final Metronome metronome = Metronome.parker(retryDelay, Clock.SYSTEM);
+        short retryCount = 0;
+        ReplicationConnection replicationConnection = null;
+        while (retryCount <= maxRetries) {
+            try {
+                return taskContext.createReplicationConnection(shouldExport, doSnapshot);
+            }
+            catch (SQLException ex) {
+                retryCount++;
+                if (retryCount > maxRetries) {
+                    LOGGER.error("Too many errors connecting to server. All {} retries failed.", maxRetries);
+                    throw new ConnectException(ex);
+                }
 
-    @Override
-    public void commit() throws InterruptedException {
-        if (running.get()) {
-            producer.commit(lastProcessedLsn);
-        }
-    }
-
-    @Override
-    public List<SourceRecord> poll() throws InterruptedException {
-        List<ChangeEvent> events = changeEventQueue.poll();
-
-        if (events.size() > 0) {
-            for (int i = events.size() - 1; i >= 0; i--) {
-                SourceRecord r = events.get(i).getRecord();
-                if (events.get(i).isLastOfLsn()) {
-                    Map<String, ?> offset = r.sourceOffset();
-                    lastProcessedLsn = (Long)offset.get(SourceInfo.LSN_KEY);
-                    break;
+                LOGGER.warn("Error connecting to server; will attempt retry {} of {} after {} " +
+                        "seconds. Exception message: {}", retryCount, maxRetries, retryDelay.getSeconds(), ex.getMessage());
+                try {
+                    metronome.pause();
+                }
+                catch (InterruptedException e) {
+                    LOGGER.warn("Connection retry sleep interrupted by exception: " + e);
+                    Thread.currentThread().interrupt();
                 }
             }
         }
-        return events.stream().map(ChangeEvent::getRecord).collect(Collectors.toList());
+        return replicationConnection;
     }
 
     @Override
-    public void stop() {
-        if (running.compareAndSet(true, false)) {
-            producer.stop();
+    public List<SourceRecord> doPoll() throws InterruptedException {
+        final List<DataChangeEvent> records = queue.poll();
+
+        final List<SourceRecord> sourceRecords = records.stream()
+                .map(DataChangeEvent::getRecord)
+                .collect(Collectors.toList());
+
+        return sourceRecords;
+    }
+
+    @Override
+    protected void doStop() {
+        if (jdbcConnection != null) {
+            jdbcConnection.close();
+        }
+
+        if (heartbeatConnection != null) {
+            heartbeatConnection.close();
+        }
+
+        if (schema != null) {
+            schema.close();
         }
     }
 
@@ -171,5 +267,9 @@ public class PostgresConnectorTask extends BaseSourceTask {
     @Override
     protected Iterable<Field> getAllConfigurationFields() {
         return PostgresConnectorConfig.ALL_FIELDS;
+    }
+
+    public PostgresTaskContext getTaskContext() {
+        return taskContext;
     }
 }

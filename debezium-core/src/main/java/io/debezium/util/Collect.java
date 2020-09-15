@@ -10,6 +10,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,7 +29,7 @@ public class Collect {
      * map will be able to contain no more than {@code maximumNumberOfEntries} entries, but the underlying map will have a
      * capacity that is the next power of larger than the supplied {@code maximumNumberOfEntries} value so that it can hold
      * the required number of entries.
-     * 
+     *
      * @param maximumNumberOfEntries the maximum number of entries allowed in the map; should be a power of 2
      * @return the map that is limited in size by the specified number of entries; never null
      */
@@ -48,7 +49,9 @@ public class Collect {
     public static <T, V> Set<T> unmodifiableSet(Function<V, T> extractor, V... values) {
         Set<T> newSet = new HashSet<>();
         for (V value : values) {
-            if (value != null) newSet.add(extractor.apply(value));
+            if (value != null) {
+                newSet.add(extractor.apply(value));
+            }
         }
         return Collections.unmodifiableSet(newSet);
     }
@@ -56,7 +59,9 @@ public class Collect {
     public static <T, V> Set<T> unmodifiableSet(Function<V, T> extractor, Collection<V> values) {
         Set<T> newSet = new HashSet<>();
         for (V value : values) {
-            if (value != null) newSet.add(extractor.apply(value));
+            if (value != null) {
+                newSet.add(extractor.apply(value));
+            }
         }
         return Collections.unmodifiableSet(newSet);
     }
@@ -65,7 +70,9 @@ public class Collect {
     public static <T> Set<T> unmodifiableSet(Set<T> values, T... additionalValues) {
         Set<T> newSet = new HashSet<>(values);
         for (T value : values) {
-            if (value != null) newSet.add(value);
+            if (value != null) {
+                newSet.add(value);
+            }
         }
         return Collections.unmodifiableSet(newSet);
     }
@@ -83,10 +90,21 @@ public class Collect {
         return Collections.unmodifiableSet(values);
     }
 
+    public static <T> Set<T> unmodifiableSet(Iterator<T> values) {
+        Set<T> set = new HashSet<>();
+        while (values.hasNext()) {
+            set.add(values.next());
+        }
+
+        return Collections.unmodifiableSet(set);
+    }
+
     public static <T> List<T> arrayListOf(T[] values) {
         List<T> result = new ArrayList<>();
         for (T value : values) {
-            if (value != null) result.add(value);
+            if (value != null) {
+                result.add(value);
+            }
         }
         return result;
     }
@@ -96,7 +114,7 @@ public class Collect {
         List<T> result = new ArrayList<>();
         result.add(first);
         for (T another : additional) {
-            if (another != null) result.add(another);
+            result.add(another);
         }
         return result;
     }
@@ -222,7 +240,8 @@ public class Collect {
         return props;
     }
 
-    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5, String value5) {
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5,
+                                          String value5) {
         Properties props = new Properties();
         props.put(key1, value1);
         props.put(key2, value2);
@@ -232,7 +251,8 @@ public class Collect {
         return props;
     }
 
-    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5, String value5, String key6, String value6) {
+    public static Properties propertiesOf(String key1, String value1, String key2, String value2, String key3, String value3, String key4, String value4, String key5,
+                                          String value5, String key6, String value6) {
         Properties props = new Properties();
         props.put(key1, value1);
         props.put(key2, value2);
@@ -247,7 +267,7 @@ public class Collect {
      * Set the value at the given position in the list, expanding the list as required to accommodate the new position.
      * <p>
      * This is not a thread-safe operation
-     * 
+     *
      * @param list the list to be modified
      * @param index the index position of the new value
      * @param value the value

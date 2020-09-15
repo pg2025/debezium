@@ -8,41 +8,49 @@ package io.debezium.relational;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.function.Predicate;
 
 import org.apache.kafka.connect.data.Schema;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import io.debezium.config.CommonConnectorConfig;
+import io.debezium.data.Envelope;
+import io.debezium.relational.Key.KeyMapper;
+import io.debezium.relational.Tables.ColumnNameFilter;
+import io.debezium.relational.Tables.TableFilter;
 import io.debezium.relational.mapping.ColumnMappers;
 import io.debezium.schema.DatabaseSchema;
 import io.debezium.schema.TopicSelector;
 
 /**
- * A {@link DatabaseSchema} of a relational database such as Postgres.
+ * A {@link DatabaseSchema} of a relational database such as Postgres. Provides information about the physical structure
+ * of the database (the "database schema") as well as the structure of corresponding CDC messages (the "event schema").
  *
  * @author Gunnar Morling
  */
 public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId> {
+    private final static Logger LOG = LoggerFactory.getLogger(RelationalDatabaseSchema.class);
 
     private final TopicSelector<TableId> topicSelector;
     private final TableSchemaBuilder schemaBuilder;
-    private final Predicate<TableId> tableFilter;
-    private final Predicate<ColumnId> columnFilter;
+    private final TableFilter tableFilter;
+    private final ColumnNameFilter columnFilter;
     private final ColumnMappers columnMappers;
+    private final KeyMapper customKeysMapper;
 
     private final String schemaPrefix;
     private final SchemasByTableId schemasByTableId;
     private final Tables tables;
 
-    protected RelationalDatabaseSchema(CommonConnectorConfig config, TopicSelector<TableId> topicSelector,
-            Predicate<TableId> tableFilter, Predicate<ColumnId> columnFilter, TableSchemaBuilder schemaBuilder,
-            boolean tableIdCaseInsensitive) {
+    protected RelationalDatabaseSchema(RelationalDatabaseConnectorConfig config, TopicSelector<TableId> topicSelector,
+                                       TableFilter tableFilter, ColumnNameFilter columnFilter, TableSchemaBuilder schemaBuilder,
+                                       boolean tableIdCaseInsensitive, KeyMapper customKeysMapper) {
 
         this.topicSelector = topicSelector;
         this.schemaBuilder = schemaBuilder;
         this.tableFilter = tableFilter;
         this.columnFilter = columnFilter;
-        this.columnMappers = ColumnMappers.create(config.getConfig());
+        this.columnMappers = ColumnMappers.create(config);
+        this.customKeysMapper = customKeysMapper;
 
         this.schemaPrefix = getSchemaPrefix(config.getLogicalName());
         this.schemasByTableId = new SchemasByTableId(tableIdCaseInsensitive);
@@ -71,6 +79,13 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
         return tables.subset(tableFilter).tableIds();
     }
 
+    @Override
+    public void assureNonEmptySchema() {
+        if (tableIds().isEmpty()) {
+            LOG.warn(NO_CAPTURED_DATA_COLLECTIONS_WARNING);
+        }
+    }
+
     /**
      * Get the {@link TableSchema Schema information} for the table with the given identifier, if that table exists and
      * is included by the filter configuration.
@@ -96,7 +111,7 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
      *         or if the table has been excluded by the filters
      */
     public Table tableFor(TableId id) {
-        return tableFilter.test(id) ? tables.forTable(id) : null;
+        return tableFilter.isIncluded(id) ? tables.forTable(id) : null;
     }
 
     protected Tables tables() {
@@ -107,9 +122,12 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
         schemasByTableId.clear();
     }
 
+    /**
+     * Builds up the CDC event schema for the given table and stores it in this schema.
+     */
     protected void buildAndRegisterSchema(Table table) {
-        if (tableFilter.test(table.id())) {
-            TableSchema schema = schemaBuilder.create(schemaPrefix, getEnvelopeSchemaName(table), table, columnFilter, columnMappers);
+        if (tableFilter.isIncluded(table.id())) {
+            TableSchema schema = schemaBuilder.create(schemaPrefix, getEnvelopeSchemaName(table), table, columnFilter, columnMappers, customKeysMapper);
             schemasByTableId.put(table.id(), schema);
         }
     }
@@ -119,9 +137,8 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
     }
 
     private String getEnvelopeSchemaName(Table table) {
-        return topicSelector.topicNameFor(table.id()) + ".Envelope";
+        return Envelope.schemaName(topicSelector.topicNameFor(table.id()));
     }
-
 
     /**
      * A map of schemas by table id. Table names are stored lower-case if required as per the config.
@@ -155,5 +172,14 @@ public abstract class RelationalDatabaseSchema implements DatabaseSchema<TableId
         private TableId toLowerCaseIfNeeded(TableId tableId) {
             return tableIdCaseInsensitive ? tableId.toLowercase() : tableId;
         }
+    }
+
+    protected TableFilter getTableFilter() {
+        return tableFilter;
+    }
+
+    @Override
+    public boolean tableInformationComplete() {
+        return false;
     }
 }

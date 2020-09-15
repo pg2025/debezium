@@ -5,15 +5,22 @@
  */
 package io.debezium.connector.mysql;
 
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.github.shyiko.mysql.binlog.BinaryLogClient;
 import com.github.shyiko.mysql.binlog.jmx.BinaryLogClientStatistics;
 
+import io.debezium.connector.base.ChangeEventQueueMetrics;
+import io.debezium.pipeline.metrics.PipelineMetrics;
+import io.debezium.util.Collect;
+
 /**
  * @author Randall Hauch
  */
-class BinlogReaderMetrics extends Metrics implements BinlogReaderMetricsMXBean {
+class BinlogReaderMetrics extends PipelineMetrics implements BinlogReaderMetricsMXBean {
 
     private final BinaryLogClient client;
     private final BinaryLogClientStatistics stats;
@@ -23,12 +30,16 @@ class BinlogReaderMetrics extends Metrics implements BinlogReaderMetricsMXBean {
     private final AtomicLong numberOfRolledBackTransactions = new AtomicLong();
     private final AtomicLong numberOfNotWellFormedTransactions = new AtomicLong();
     private final AtomicLong numberOfLargeTransactions = new AtomicLong();
+    private final AtomicBoolean isGtidModeEnabled = new AtomicBoolean(false);
+    private final AtomicLong milliSecondsBehindMaster = new AtomicLong();
+    private final AtomicReference<String> lastTransactionId = new AtomicReference<>();
 
-    public BinlogReaderMetrics(BinaryLogClient client, MySqlSchema schema) {
-        super("binlog");
+    public BinlogReaderMetrics(BinaryLogClient client, MySqlTaskContext taskContext, String name, ChangeEventQueueMetrics changeEventQueueMetrics) {
+        super(taskContext, name, changeEventQueueMetrics, null);
         this.client = client;
         this.stats = new BinaryLogClientStatistics(client);
-        this.schema = schema;
+        this.schema = taskContext.dbSchema();
+        this.milliSecondsBehindMaster.set(-1);
     }
 
     @Override
@@ -52,18 +63,18 @@ class BinlogReaderMetrics extends Metrics implements BinlogReaderMetricsMXBean {
     }
 
     @Override
+    public boolean getIsGtidModeEnabled() {
+        return isGtidModeEnabled.get();
+    }
+
+    @Override
     public String getLastEvent() {
         return this.stats.getLastEvent();
     }
 
     @Override
-    public long getSecondsSinceLastEvent() {
-        return this.stats.getSecondsSinceLastEvent();
-    }
-
-    @Override
-    public long getSecondsBehindMaster() {
-        return this.stats.getSecondsBehindMaster();
+    public long getMilliSecondsSinceLastEvent() {
+        return this.stats.getSecondsSinceLastEvent() * 1000;
     }
 
     @Override
@@ -88,6 +99,8 @@ class BinlogReaderMetrics extends Metrics implements BinlogReaderMetricsMXBean {
         numberOfRolledBackTransactions.set(0);
         numberOfNotWellFormedTransactions.set(0);
         numberOfLargeTransactions.set(0);
+        lastTransactionId.set(null);
+        isGtidModeEnabled.set(false);
     }
 
     @Override
@@ -126,9 +139,39 @@ class BinlogReaderMetrics extends Metrics implements BinlogReaderMetricsMXBean {
         numberOfLargeTransactions.incrementAndGet();
     }
 
+    public void onGtidChange(String gtid) {
+        lastTransactionId.set(gtid);
+    }
+
+    public void setIsGtidModeEnabled(final boolean enabled) {
+        isGtidModeEnabled.set(enabled);
+    }
+
+    public void setMilliSecondsBehindSource(long value) {
+        milliSecondsBehindMaster.set(value);
+    }
+
     @Override
     public String[] getMonitoredTables() {
         return schema.monitoredTablesAsStringArray();
+    }
+
+    @Override
+    public long getMilliSecondsBehindSource() {
+        return milliSecondsBehindMaster.get();
+    }
+
+    @Override
+    public Map<String, String> getSourceEventPosition() {
+        return Collect.hashMapOf(
+                "filename", getBinlogFilename(),
+                "position", Long.toString(getBinlogPosition()),
+                "gtid", getGtidSet());
+    }
+
+    @Override
+    public String getLastTransactionId() {
+        return lastTransactionId.get();
     }
 
 }

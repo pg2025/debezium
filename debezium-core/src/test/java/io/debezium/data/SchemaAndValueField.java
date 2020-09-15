@@ -14,12 +14,12 @@ import org.apache.kafka.connect.data.Struct;
 import org.fest.assertions.Assertions;
 
 public class SchemaAndValueField {
-    private final Object schema;
+    private final Schema schema;
     private final Object value;
     private final String fieldName;
     private Supplier<Boolean> assertValueOnlyIf = null;
 
-    public SchemaAndValueField(String fieldName, Object schema, Object value) {
+    public SchemaAndValueField(String fieldName, Schema schema, Object value) {
         this.schema = schema;
         this.value = value;
         this.fieldName = fieldName;
@@ -48,14 +48,14 @@ public class SchemaAndValueField {
         Assertions.assertThat(actualValue).as(fieldName + " is not present in the actual content").isNotNull();
 
         // assert the value type; for List all implementation types (e.g. immutable ones) are acceptable
-        if(actualValue instanceof List) {
+        if (actualValue instanceof List) {
             Assertions.assertThat(value).as("Incorrect value type for " + fieldName).isInstanceOf(List.class);
-            final List<?> actualValueList = (List<?>)actualValue;
-            final List<?> valueList = (List<?>)value;
+            final List<?> actualValueList = (List<?>) actualValue;
+            final List<?> valueList = (List<?>) value;
             Assertions.assertThat(actualValueList).as("List size don't match for " + fieldName).hasSize(valueList.size());
             if (!valueList.isEmpty() && valueList.iterator().next() instanceof Struct) {
                 for (int i = 0; i < valueList.size(); i++) {
-                    assertStruct((Struct)valueList.get(i), (Struct)actualValueList.get(i));
+                    assertStruct((Struct) valueList.get(i), (Struct) actualValueList.get(i));
                 }
                 return;
             }
@@ -68,7 +68,7 @@ public class SchemaAndValueField {
             Assertions.assertThat((byte[]) actualValue).as("Values don't match for " + fieldName).isEqualTo((byte[]) value);
         }
         else if (actualValue instanceof Struct) {
-            assertStruct((Struct)value, (Struct)actualValue);
+            assertStruct((Struct) value, (Struct) actualValue);
         }
         else {
             Assertions.assertThat(actualValue).as("Values don't match for " + fieldName).isEqualTo(value);
@@ -90,7 +90,7 @@ public class SchemaAndValueField {
                 Assertions.assertThat((byte[]) actualValue).as("Values don't match for " + fieldName).isEqualTo((byte[]) expectedValue);
             }
             else if (actualValue instanceof Struct) {
-                assertStruct((Struct)expectedValue, (Struct)actualValue);
+                assertStruct((Struct) expectedValue, (Struct) actualValue);
             }
             else {
                 Assertions.assertThat(actualValue).as("Values don't match for " + fieldName).isEqualTo(expectedValue);
@@ -105,6 +105,7 @@ public class SchemaAndValueField {
         Schema schema = content.schema();
         Field field = schema.field(fieldName);
         Assertions.assertThat(field).as(fieldName + " not found in schema " + schema).isNotNull();
-        Assertions.assertThat(field.schema()).as("Schema for " + field.name() + " does not match the actual value").isEqualTo(this.schema);
+
+        VerifyRecord.assertConnectSchemasAreEqual(field.name(), field.schema(), this.schema);
     }
 }

@@ -5,13 +5,13 @@
  */
 package io.debezium.kafka;
 
+import static org.fest.assertions.Assertions.assertThat;
+
 import java.io.File;
 
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-
-import static org.fest.assertions.Assertions.assertThat;
 
 import io.debezium.util.Testing;
 
@@ -60,7 +60,7 @@ public class ZookeeperServerTest {
         assertThat(dir.isDirectory()).isTrue();
         assertThat(dir.canWrite()).isTrue();
         assertThat(dir.canRead()).isTrue();
-        assertThat(Testing.Files.inTargetDir(dir)).isTrue();
+        assertThat(Testing.Files.inTestDataDir(dir)).isTrue();
     }
 
     protected void assertDoesNotExist(File dir) {

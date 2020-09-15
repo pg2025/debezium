@@ -11,6 +11,9 @@ import io.debezium.data.Envelope;
 
 public interface DataCollectionSchema {
 
+    DataCollectionId id();
+
     Schema keySchema();
+
     Envelope getEnvelopeSchema();
 }
